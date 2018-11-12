@@ -67,6 +67,8 @@
 #include "PositionControl.hpp"
 #include "Utility/ControlMath.hpp"
 
+using namespace time_literals;
+
 /**
  * Multicopter position control app start / stop handling function
  */
@@ -184,12 +186,12 @@ private:
 	 * Parameter update can be forced when argument is true.
 	 * @param force forces parameter update.
 	 */
-	int		parameters_update(bool force);
+	int parameters_update(bool force);
 
 	/**
 	 * Check for changes in subscribed topics.
 	 */
-	void		poll_subscriptions();
+	void poll_subscriptions();
 
 	/**
 	 * Check for validity of positon/velocity states.
@@ -368,7 +370,7 @@ MulticopterPositionControl::warn_rate_limited(const char *string)
 int
 MulticopterPositionControl::parameters_update(bool force)
 {
-	bool updated;
+	bool updated = false;
 	struct parameter_update_s param_upd;
 
 	orb_check(_params_sub, &updated);
@@ -401,7 +403,7 @@ MulticopterPositionControl::parameters_update(bool force)
 void
 MulticopterPositionControl::poll_subscriptions()
 {
-	bool updated;
+	bool updated = false;
 
 	orb_check(_vehicle_status_sub, &updated);
 
@@ -559,7 +561,9 @@ MulticopterPositionControl::set_vehicle_states(const float &vel_sp_z)
 void
 MulticopterPositionControl::run()
 {
-	// do subscriptions
+	hrt_abstime _time_stamp_last_loop = 0; // time stamp of last loop iteration
+
+	// initialize subscriptions
 	_vehicle_status_sub = orb_subscribe(ORB_ID(vehicle_status));
 	_vehicle_land_detected_sub = orb_subscribe(ORB_ID(vehicle_land_detected));
 	_control_mode_sub = orb_subscribe(ORB_ID(vehicle_control_mode));
@@ -569,44 +573,35 @@ MulticopterPositionControl::run()
 	_home_pos_sub = orb_subscribe(ORB_ID(home_position));
 	_traj_wp_avoidance_sub = orb_subscribe(ORB_ID(vehicle_trajectory_waypoint));
 
+	// get initial values for all parameters and subscribtions
 	parameters_update(true);
-
-	// get an initial update for all sensor and status data
 	poll_subscriptions();
-
-	hrt_abstime t_prev = 0;
 
 	// Let's be safe and have the landing gear down by default
 	_att_sp.landing_gear = vehicle_attitude_setpoint_s::LANDING_GEAR_DOWN;
 
-	// wakeup source
-	px4_pollfd_struct_t fds[1];
-
-	fds[0].fd = _local_pos_sub;
-	fds[0].events = POLLIN;
+	// setup file descriptor to poll as loop wakeup source
+	px4_pollfd_struct_t poll_fd;
+	poll_fd.fd = _local_pos_sub;
+	poll_fd.events = POLLIN;
 
 	while (!should_exit()) {
-		// wait for up to 20ms for data
-		int pret = px4_poll(&fds[0], (sizeof(fds) / sizeof(fds[0])), 20);
-
-		// pret == 0: go through the loop anyway to copy manual input at 50 Hz.
-
+		// poll for new data on the local position state topic (wait for up to 20ms)
+		const int poll_return = px4_poll(&poll_fd, 1, 20);
+		// poll_return == 0: go through the loop anyway to copy manual input at 50 Hz.
 		// this is undesirable but not much we can do
-		if (pret < 0) {
-			PX4_ERR("poll error %d, %d", pret, errno);
+		if (poll_return < 0) {
+			PX4_ERR("poll error %d, %d", poll_return, errno);
 			continue;
 		}
 
 		poll_subscriptions();
-
 		parameters_update(false);
 
-		hrt_abstime t = hrt_absolute_time();
-		const float dt = t_prev != 0 ? (t - t_prev) / 1e6f : 0.004f;
-		t_prev = t;
-
-		// set dt for control blocks
-		setDt(dt);
+		// measure dt the time difference since the last loop iteration
+		const hrt_abstime _time_stamp_current = hrt_absolute_time();
+		setDt(math::min((_time_stamp_current - _time_stamp_last_loop), 50_ms) / 1e6f);
+		_time_stamp_last_loop = _time_stamp_current;
 
 		const bool was_in_failsafe = _in_failsafe;
 		_in_failsafe = false;
@@ -720,7 +715,7 @@ MulticopterPositionControl::run()
 				setpoint.x = setpoint.y = setpoint.z = NAN;
 				setpoint.vx = setpoint.vy = setpoint.vz = NAN;
 				setpoint.yawspeed = NAN;
-				setpoint.yaw = _states.yaw;
+				setpoint.yaw = NAN;
 				constraints.landing_gear = vehicle_constraints_s::GEAR_KEEP;
 				// reactivate the task which will reset the setpoint to current state
 				_flight_tasks.reActivate();
